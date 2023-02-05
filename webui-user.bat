@@ -3,6 +3,6 @@
 set PYTHON=
 set GIT=
 set VENV_DIR=
-set COMMANDLINE_ARGS=--xformers --nai.ckpt
+set COMMANDLINE_ARGS=--xformers 
 
 call webui.bat

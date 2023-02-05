@@ -34,13 +34,16 @@ for file in files:
         im.seek(frame)
         # get the name of the file without the extension
         file_name = os.path.splitext(file)[0]
+        # add missing 0's to the frame number
+        if frame < 10:
+            frame = '00' + str(frame)
+        elif frame < 100:
+            frame = '0' + str(frame)
         # get the full path to the output file
-        output_file = os.path.join(output_dir, file_name + '_' + str(frame) + '.png')
+        output_file = os.path.join(processed_dir, file_name + '_' + str(frame) + '.png')
         # save the file
         im.save(output_file)
         print('Saved file: ' + output_file)
-    # then move the file to the processed folder
-    shutil.copy2(file_path, processed_dir)
 
 
 
@@ -50,6 +53,9 @@ for file in files:
 # with the same name as the png file
 # create a list of filenames in the output_dir
 filenames = os.listdir(output_dir)
+if len(filenames) == 0:
+    print('No files to process')
+    exit()
 # get full path to file
 file_paths = []
 filename = os.path.splitext(filenames[0])[0]
@@ -57,6 +63,7 @@ for files in filenames:
     file_paths.append(os.path.join(output_dir, files))
 
 # save the files as an animated gif
-gif_dir = os.path.join(cwd, 'output', 'animation')
-imageio.mimsave(f'{filename}.gif', [imageio.imread(f) for f in file_paths], fps=10)
+gif_dir = os.path.join(cwd, 'outputs', 'animations')
+output_file = os.path.join(gif_dir, filename + '.gif')
+imageio.mimsave(output_file, [imageio.imread(f) for f in file_paths], fps=10)
 

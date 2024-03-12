@@ -1,22 +1,23 @@
+from __future__ import annotations
 import base64
 import io
 import json
 import os
 import re
+import sys
 
 import gradio as gr
 from modules.paths import data_path
-from modules import shared, ui_tempdir, script_callbacks
+from modules import shared, ui_tempdir, script_callbacks, processing, infotext_versions
 from PIL import Image
 
-re_param_code = r'\s*([\w ]+):\s*("(?:\\"[^,]|\\"|\\|[^\"])+"|[^,]*)(?:,|$)'
+sys.modules['modules.generation_parameters_copypaste'] = sys.modules[__name__]  # alias for old name
+
+re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)
 re_imagesize = re.compile(r"^(\d+)x(\d+)$")
 re_hypernet_hash = re.compile("\(([0-9a-f]+)\)$")
 type_of_gr_update = type(gr.update())
-
-paste_fields = {}
-registered_param_bindings = []
 
 
 class ParamBinding:
@@ -30,8 +31,26 @@ class ParamBinding:
         self.paste_field_names = paste_field_names or []
 
 
+class PasteField(tuple):
+    def __new__(cls, component, target, *, api=None):
+        return super().__new__(cls, (component, target))
+
+    def __init__(self, component, target, *, api=None):
+        super().__init__()
+
+        self.api = api
+        self.component = component
+        self.label = target if isinstance(target, str) else None
+        self.function = target if callable(target) else None
+
+
+paste_fields: dict[str, dict] = {}
+registered_param_bindings: list[ParamBinding] = []
+
+
 def reset():
     paste_fields.clear()
+    registered_param_bindings.clear()
 
 
 def quote(text):
@@ -81,6 +100,12 @@ def image_from_url_text(filedata):
 
 
 def add_paste_fields(tabname, init_img, fields, override_settings_component=None):
+
+    if fields:
+        for i in range(len(fields)):
+            if not isinstance(fields[i], PasteField):
+                fields[i] = PasteField(*fields[i])
+
     paste_fields[tabname] = {"init_img": init_img, "fields": fields, "override_settings_component": override_settings_component}
 
     # backwards compatibility for existing extensions
@@ -112,7 +137,6 @@ def register_paste_params_button(binding: ParamBinding):
 
 
 def connect_paste_params_buttons():
-    binding: ParamBinding
     for binding in registered_param_bindings:
         destination_image_component = paste_fields[binding.tabname]["init_img"]
         fields = paste_fields[binding.tabname]["fields"]
@@ -198,7 +222,6 @@ def restore_old_hires_fix_params(res):
     height = int(res.get("Size-2", 512))
 
     if firstpass_width == 0 or firstpass_height == 0:
-        from modules import processing
         firstpass_width, firstpass_height = processing.old_hires_fix_first_pass_dimensions(width, height)
 
     res['Size-1'] = firstpass_width
@@ -207,7 +230,7 @@ def restore_old_hires_fix_params(res):
     res['Hires resize-2'] = height
 
 
-def parse_generation_parameters(x: str):
+def parse_generation_parameters(x: str, skip_fields: list[str] | None = None):
     """parses generation parameters string, the one you see in text field under the picture in UI:
 ```
 girl with an artist's beret, determined, blue eyes, desert scene, computer monitors, heavy makeup, by Alphonse Mucha and Charlie Bowater, ((eyeshadow)), (coquettish), detailed, intricate
@@ -217,6 +240,8 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
 
     returns a dict with field values
     """
+    if skip_fields is None:
+        skip_fields = shared.opts.infotext_skip_pasting
 
     res = {}
 
@@ -280,11 +305,26 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
     if "Hires sampler" not in res:
         res["Hires sampler"] = "Use same sampler"
 
+    if "Hires checkpoint" not in res:
+        res["Hires checkpoint"] = "Use same checkpoint"
+
     if "Hires prompt" not in res:
         res["Hires prompt"] = ""
 
     if "Hires negative prompt" not in res:
         res["Hires negative prompt"] = ""
+
+    if "Mask mode" not in res:
+        res["Mask mode"] = "Inpaint masked"
+
+    if "Masked content" not in res:
+        res["Masked content"] = 'original'
+
+    if "Inpaint area" not in res:
+        res["Inpaint area"] = "Whole picture"
+
+    if "Masked area padding" not in res:
+        res["Masked area padding"] = 32
 
     restore_old_hires_fix_params(res)
 
@@ -304,32 +344,42 @@ Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 965400086, Size: 512x512, Model
     if "Schedule rho" not in res:
         res["Schedule rho"] = 0
 
+    if "VAE Encoder" not in res:
+        res["VAE Encoder"] = "Full"
+
+    if "VAE Decoder" not in res:
+        res["VAE Decoder"] = "Full"
+
+    if "FP8 weight" not in res:
+        res["FP8 weight"] = "Disable"
+
+    if "Cache FP16 weight for LoRA" not in res and res["FP8 weight"] != "Disable":
+        res["Cache FP16 weight for LoRA"] = False
+
+    if "Emphasis" not in res:
+        res["Emphasis"] = "Original"
+
+    infotext_versions.backcompat(res)
+
+    for key in skip_fields:
+        res.pop(key, None)
+
     return res
 
 
 infotext_to_setting_name_mapping = [
-    ('Clip skip', 'CLIP_stop_at_last_layers', ),
+
+]
+"""Mapping of infotext labels to setting names. Only left for backwards compatibility - use OptionInfo(..., infotext='...') instead.
+Example content:
+
+infotext_to_setting_name_mapping = [
     ('Conditional mask weight', 'inpainting_mask_weight'),
     ('Model hash', 'sd_model_checkpoint'),
     ('ENSD', 'eta_noise_seed_delta'),
     ('Schedule type', 'k_sched_type'),
-    ('Schedule max sigma', 'sigma_max'),
-    ('Schedule min sigma', 'sigma_min'),
-    ('Schedule rho', 'rho'),
-    ('Noise multiplier', 'initial_noise_multiplier'),
-    ('Eta', 'eta_ancestral'),
-    ('Eta DDIM', 'eta_ddim'),
-    ('Discard penultimate sigma', 'always_discard_next_to_last_sigma'),
-    ('UniPC variant', 'uni_pc_variant'),
-    ('UniPC skip type', 'uni_pc_skip_type'),
-    ('UniPC order', 'uni_pc_order'),
-    ('UniPC lower order final', 'uni_pc_lower_order_final'),
-    ('Token merging ratio', 'token_merging_ratio'),
-    ('Token merging ratio hr', 'token_merging_ratio_hr'),
-    ('RNG', 'randn_source'),
-    ('NGMS', 's_min_uncond'),
-    ('Pad conds', 'pad_cond_uncond'),
 ]
+"""
 
 
 def create_override_settings_dict(text_pairs):
@@ -350,7 +400,8 @@ def create_override_settings_dict(text_pairs):
 
         params[k] = v.strip()
 
-    for param_name, setting_name in infotext_to_setting_name_mapping:
+    mapping = [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext]
+    for param_name, setting_name in mapping + infotext_to_setting_name_mapping:
         value = params.get(param_name, None)
 
         if value is None:
@@ -361,13 +412,57 @@ def create_override_settings_dict(text_pairs):
     return res
 
 
+def get_override_settings(params, *, skip_fields=None):
+    """Returns a list of settings overrides from the infotext parameters dictionary.
+
+    This function checks the `params` dictionary for any keys that correspond to settings in `shared.opts` and returns
+    a list of tuples containing the parameter name, setting name, and new value cast to correct type.
+
+    It checks for conditions before adding an override:
+    - ignores settings that match the current value
+    - ignores parameter keys present in skip_fields argument.
+
+    Example input:
+        {"Clip skip": "2"}
+
+    Example output:
+        [("Clip skip", "CLIP_stop_at_last_layers", 2)]
+    """
+
+    res = []
+
+    mapping = [(info.infotext, k) for k, info in shared.opts.data_labels.items() if info.infotext]
+    for param_name, setting_name in mapping + infotext_to_setting_name_mapping:
+        if param_name in (skip_fields or {}):
+            continue
+
+        v = params.get(param_name, None)
+        if v is None:
+            continue
+
+        if setting_name == "sd_model_checkpoint" and shared.opts.disable_weights_auto_swap:
+            continue
+
+        v = shared.opts.cast_value(setting_name, v)
+        current_value = getattr(shared.opts, setting_name, None)
+
+        if v == current_value:
+            continue
+
+        res.append((param_name, setting_name, v))
+
+    return res
+
+
 def connect_paste(button, paste_fields, input_comp, override_settings_component, tabname):
     def paste_func(prompt):
         if not prompt and not shared.cmd_opts.hide_ui_dir_config:
             filename = os.path.join(data_path, "params.txt")
-            if os.path.exists(filename):
+            try:
                 with open(filename, "r", encoding="utf8") as file:
                     prompt = file.read()
+            except OSError:
+                pass
 
         params = parse_generation_parameters(prompt)
         script_callbacks.infotext_pasted_callback(prompt, params)
@@ -389,6 +484,8 @@ def connect_paste(button, paste_fields, input_comp, override_settings_component,
 
                     if valtype == bool and v == "False":
                         val = False
+                    elif valtype == int:
+                        val = float(v)
                     else:
                         val = valtype(v)
 
@@ -399,26 +496,12 @@ def connect_paste(button, paste_fields, input_comp, override_settings_component,
         return res
 
     if override_settings_component is not None:
+        already_handled_fields = {key: 1 for _, key in paste_fields}
+
         def paste_settings(params):
-            vals = {}
+            vals = get_override_settings(params, skip_fields=already_handled_fields)
 
-            for param_name, setting_name in infotext_to_setting_name_mapping:
-                v = params.get(param_name, None)
-                if v is None:
-                    continue
-
-                if setting_name == "sd_model_checkpoint" and shared.opts.disable_weights_auto_swap:
-                    continue
-
-                v = shared.opts.cast_value(setting_name, v)
-                current_value = getattr(shared.opts, setting_name, None)
-
-                if v == current_value:
-                    continue
-
-                vals[param_name] = v
-
-            vals_pairs = [f"{k}: {v}" for k, v in vals.items()]
+            vals_pairs = [f"{infotext_text}: {value}" for infotext_text, setting_name, value in vals]
 
             return gr.Dropdown.update(value=vals_pairs, choices=vals_pairs, visible=bool(vals_pairs))
 
@@ -437,3 +520,4 @@ def connect_paste(button, paste_fields, input_comp, override_settings_component,
         outputs=[],
         show_progress=False,
     )
+

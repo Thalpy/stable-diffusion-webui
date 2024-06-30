@@ -42,3 +42,5 @@ notification.mp3
 /.coverage*
 /outputs_backup
 /test/test_outputs
+/outputs_backups
+/cache
